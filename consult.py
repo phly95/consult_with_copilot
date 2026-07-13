@@ -8,7 +8,7 @@ Commands:
     bundle file1 file2 "question"      Bundle files and ask
     doctor                             Check installation and login status
     login                              Open browser to authenticate
-    logout                             Delete browser profile and sessions
+    logout                             Delete browser profile
     session --create --list --delete   Manage conversation sessions
 """
 
@@ -27,29 +27,36 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.browser import CopilotSession, PERSISTENT_DIR
 from lib.session import SessionManager
-from lib.files import repo_to_text, bundle_files, file_with_txt_extension, is_image
-
-# Sensitive file patterns that should never be uploaded
-SENSITIVE_PATTERNS = {
-    ".env", ".env.local", ".env.production", ".env.development",
-    "credentials.json", "service-account.json", "keyfile.json",
-    "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
-    "id_rsa", "id_ed25519", "id_ecdsa",
-    ".netrc", ".npmrc", ".pypirc",
-    "kubeconfig", ".kube/config",
-    "browser_profile", "browser_data",
-}
+from lib.files import repo_to_text, bundle_files, file_with_txt_extension
+from lib.security import is_image, is_sensitive
 
 EXIT_OK = 0
 EXIT_ERROR = 1
-EXIT_NOT_LOGGED_IN = 2
 EXIT_FILE_NOT_FOUND = 3
 EXIT_SENSITIVE_FILE = 4
+
+# Module-level storage for JSON error output.
+_last_error = None
 
 
 def eprint(msg):
     """Print to stderr."""
     print(msg, file=sys.stderr)
+
+
+def _make_json_output(**overrides):
+    """Build a standard JSON response envelope, merging in per-command fields."""
+    base = {
+        "session_id": None,
+        "model": None,
+        "response": None,
+        "downloaded": [],
+        "elapsed_seconds": None,
+        "conversation_url": None,
+        "error": _last_error,
+    }
+    base.update(overrides)
+    return base
 
 
 def cmd_doctor(args):
@@ -88,7 +95,6 @@ def cmd_doctor(args):
             [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
             capture_output=True, text=True, timeout=10
         )
-        # dry-run may not exist, try direct check
         chromium_path = Path.home() / ".cache" / "ms-playwright"
         has_chromium = any(chromium_path.glob("chromium-*")) if chromium_path.exists() else False
         check("Chromium browser", has_chromium, "installed" if has_chromium else "run: playwright install chromium")
@@ -161,12 +167,12 @@ def cmd_send(args):
     for fp in attach_files:
         p = Path(fp)
         if not p.exists():
-            eprint(f"Error: file not found: {fp}")
-            sys.exit(EXIT_FILE_NOT_FOUND)
-        if _is_sensitive(p):
-            eprint(f"Error: refusing to attach sensitive file: {fp}")
-            eprint("Use --force-attach to override (not recommended)")
-            sys.exit(EXIT_SENSITIVE_FILE)
+            return _exit_with_error(EXIT_FILE_NOT_FOUND, f"file not found: {fp}")
+        if is_sensitive(p):
+            return _exit_with_error(
+                EXIT_SENSITIVE_FILE,
+                f"refusing to attach sensitive file: {fp}",
+            )
 
     # Determine download directory
     download_dir = None
@@ -208,14 +214,14 @@ def cmd_send(args):
             Path(tf).unlink(missing_ok=True)
 
         if json_mode:
-            output = {
-                "session_id": session_id,
-                "model": model,
-                "response": response,
-                "downloaded": downloaded,
-                "elapsed_seconds": round(elapsed, 1),
-                "conversation_url": cs.page.url,
-            }
+            output = _make_json_output(
+                session_id=session_id,
+                model=model,
+                response=response,
+                downloaded=downloaded,
+                elapsed_seconds=round(elapsed, 1),
+                conversation_url=cs.page.url,
+            )
             print(json.dumps(output, indent=2))
         else:
             if response:
@@ -242,8 +248,7 @@ def cmd_repo(args):
     """Convert a repo to text and send to Copilot as a file attachment."""
     repo_path = Path(args.repo_path)
     if not repo_path.is_dir():
-        eprint(f"Error: not a directory: {args.repo_path}")
-        sys.exit(EXIT_FILE_NOT_FOUND)
+        return _exit_with_error(EXIT_FILE_NOT_FOUND, f"not a directory: {args.repo_path}")
 
     unified_text, image_paths = repo_to_text(
         args.repo_path,
@@ -256,12 +261,25 @@ def cmd_repo(args):
         print(f"Repository: {repo_path.name}")
         print(f"Unified text: {len(unified_text)} chars")
         print(f"Images: {len(image_paths)}")
-        print(f"\nFirst 500 chars of unified text:")
-        print(unified_text[:500])
-        if image_paths:
-            print(f"\nImage files:")
-            for ip in image_paths:
-                print(f"  {ip}")
+        # Show directory structure (extracted between tags)
+        ds_start = unified_text.find("<directory_structure>")
+        ds_end = unified_text.find("</directory_structure>")
+        if ds_start != -1 and ds_end != -1:
+            print(f"\nDirectory structure:")
+            print(unified_text[ds_start:ds_end + len("</directory_structure>")])
+        # Show first file content
+        fs_start = unified_text.find("<file ")
+        if fs_start != -1:
+            snippet_end = unified_text.find("</file>", fs_start)
+            if snippet_end != -1:
+                snippet_end += len("</file>")
+                # Cap at 500 chars
+                if snippet_end - fs_start > 500:
+                    snippet_end = fs_start + 500
+            else:
+                snippet_end = fs_start + 500
+            print(f"\nFirst file snippet:")
+            print(unified_text[fs_start:snippet_end])
         return EXIT_OK
 
     # Save as .txt file for attachment
@@ -276,28 +294,35 @@ def cmd_repo(args):
     session_id = args.session or str(uuid.uuid4())[:8]
     sm.create(session_id, model="GPT 5.6 Think deeper")
 
-    eprint(f"Sending to Copilot (repo: {repo_path.name}, {len(unified_text)} chars)...")
+    if not getattr(args, 'json', False):
+        eprint(f"Sending to Copilot (repo: {repo_path.name}, {len(unified_text)} chars)...")
 
+    t_start = time.time()
     with CopilotSession(headless=args.headless) as cs:
         cs.set_model("GPT 5.6 Think deeper")
         model = cs.verify_model()
-        eprint(f"Model: {model}")
+        if not getattr(args, 'json', False):
+            eprint(f"Model: {model}")
 
         attach = [str(txt_file)] + (image_paths if image_paths else [])
         response, downloaded = cs.send_message(question, attach)
+        elapsed = time.time() - t_start
 
         txt_file.unlink(missing_ok=True)
 
         json_mode = getattr(args, 'json', False)
         if json_mode:
-            output = {
-                "session_id": session_id,
-                "model": model,
-                "repo": repo_path.name,
-                "chars": len(unified_text),
-                "response": response,
-                "downloaded": downloaded,
-            }
+            output = _make_json_output(
+                session_id=session_id,
+                model=model,
+                response=response,
+                downloaded=downloaded,
+                elapsed_seconds=round(elapsed, 1),
+                conversation_url=cs.page.url,
+            )
+            # Extra repo-specific fields
+            output["repo"] = repo_path.name
+            output["chars"] = len(unified_text)
             print(json.dumps(output, indent=2))
         else:
             if response:
@@ -310,7 +335,8 @@ def cmd_repo(args):
             sm.add_message(session_id, "assistant", response)
         sm.update(session_id, conversation_url=cs.page.url)
 
-    eprint(f"\nSession: {session_id}")
+    if not getattr(args, 'json', False):
+        eprint(f"\nSession: {session_id}")
     return EXIT_OK
 
 
@@ -319,11 +345,9 @@ def cmd_bundle(args):
     # Check files exist and aren't sensitive
     for fp in args.files:
         if not Path(fp).exists():
-            eprint(f"Error: file not found: {fp}")
-            sys.exit(EXIT_FILE_NOT_FOUND)
-        if _is_sensitive(Path(fp)):
-            eprint(f"Error: refusing to include sensitive file: {fp}")
-            sys.exit(EXIT_SENSITIVE_FILE)
+            return _exit_with_error(EXIT_FILE_NOT_FOUND, f"file not found: {fp}")
+        if is_sensitive(Path(fp)):
+            return _exit_with_error(EXIT_SENSITIVE_FILE, f"refusing to include sensitive file: {fp}")
 
     unified_text, image_paths = bundle_files(args.files)
 
@@ -338,27 +362,33 @@ def cmd_bundle(args):
     txt_file = Path(tempfile.gettempdir()) / "bundled_files.txt"
     txt_file.write_text(unified_text)
 
-    eprint(f"Sending {len(args.files)} files to Copilot ({len(unified_text)} chars)...")
+    if not getattr(args, 'json', False):
+        eprint(f"Sending {len(args.files)} files to Copilot ({len(unified_text)} chars)...")
 
+    t_start = time.time()
     with CopilotSession(headless=args.headless) as cs:
         cs.set_model("GPT 5.6 Think deeper")
         model = cs.verify_model()
-        eprint(f"Model: {model}")
+        if not getattr(args, 'json', False):
+            eprint(f"Model: {model}")
 
         attach = [str(txt_file)] + (image_paths if image_paths else [])
         response, downloaded = cs.send_message(question, attach)
+        elapsed = time.time() - t_start
 
         txt_file.unlink(missing_ok=True)
 
         json_mode = getattr(args, 'json', False)
         if json_mode:
-            output = {
-                "session_id": session_id,
-                "model": model,
-                "files": args.files,
-                "response": response,
-                "downloaded": downloaded,
-            }
+            output = _make_json_output(
+                session_id=session_id,
+                model=model,
+                response=response,
+                downloaded=downloaded,
+                elapsed_seconds=round(elapsed, 1),
+                conversation_url=cs.page.url,
+            )
+            output["files"] = args.files
             print(json.dumps(output, indent=2))
         else:
             if response:
@@ -371,7 +401,8 @@ def cmd_bundle(args):
             sm.add_message(session_id, "assistant", response)
         sm.update(session_id, conversation_url=cs.page.url)
 
-    eprint(f"\nSession: {session_id}")
+    if not getattr(args, 'json', False):
+        eprint(f"\nSession: {session_id}")
     return EXIT_OK
 
 
@@ -417,7 +448,7 @@ def cmd_login(args):
 
 
 def cmd_logout(args):
-    """Delete browser profile and sessions."""
+    """Delete browser profile. With --all, also clear sessions and downloads."""
     profile = PERSISTENT_DIR
     sessions_dir = Path(__file__).parent / "sessions"
     downloads_dir = Path(__file__).parent / "downloads"
@@ -426,32 +457,34 @@ def cmd_logout(args):
         shutil.rmtree(profile)
         eprint(f"Deleted browser profile: {profile}")
 
-    if sessions_dir.exists():
-        for f in sessions_dir.glob("*.json"):
-            f.unlink()
-        eprint(f"Cleared sessions: {sessions_dir}")
+    if getattr(args, 'all', False):
+        if sessions_dir.exists():
+            for f in sessions_dir.glob("*.json"):
+                f.unlink()
+            eprint(f"Cleared sessions: {sessions_dir}")
 
-    if downloads_dir.exists():
-        shutil.rmtree(downloads_dir)
-        eprint(f"Deleted downloads: {downloads_dir}")
+        if downloads_dir.exists():
+            shutil.rmtree(downloads_dir)
+            eprint(f"Deleted downloads: {downloads_dir}")
 
-    eprint("All local data cleared. Run 'login' to re-authenticate.")
+        eprint("All local data cleared. Run 'login' to re-authenticate.")
+    else:
+        eprint("Browser profile cleared. Run 'login' to re-authenticate.")
+        eprint("Use --all to also delete sessions and downloads.")
+
     return EXIT_OK
 
 
-def _is_sensitive(path):
-    """Check if a file matches sensitive patterns."""
-    name = path.name.lower()
-    for pattern in SENSITIVE_PATTERNS:
-        if pattern.startswith("*"):
-            if name.endswith(pattern[1:]):
-                return True
-        elif name == pattern.lower():
-            return True
-        # Check parent dir name for browser_profile/browser_data
-        if "browser_profile" in str(path) or "browser_data" in str(path):
-            return True
-    return False
+def _exit_with_error(code, message):
+    """Set the module-level error and return the exit code.
+
+    In JSON mode the caller can print ``_last_error`` in the output;
+    in text mode the message goes to stderr immediately.
+    """
+    global _last_error
+    _last_error = message
+    eprint(f"Error: {message}")
+    return code
 
 
 def main():
@@ -487,6 +520,8 @@ def main():
     p_repo.add_argument("--exclude", nargs="*", metavar="PATTERN", help="Glob patterns to exclude")
     p_repo.add_argument("--session", "-s", help="Session ID")
     p_repo.add_argument("--dry-run", action="store_true", help="Show what would be sent without sending")
+    p_repo.add_argument("--tracked-only", action="store_true",
+                        help="Only include git-tracked files (requires git)")
 
     # bundle
     p_bundle = sub.add_parser("bundle", help="Bundle files and send")
@@ -505,7 +540,9 @@ def main():
     sub.add_parser("login", help="Open browser to authenticate with M365")
 
     # logout
-    sub.add_parser("logout", help="Delete browser profile and all local data")
+    p_logout = sub.add_parser("logout", help="Delete browser profile (use --all for everything)")
+    p_logout.add_argument("--all", action="store_true",
+                          help="Also delete sessions and downloads")
 
     args = parser.parse_args()
 

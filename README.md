@@ -33,7 +33,7 @@ bash setup.sh
 
 **Expected output:**
 ```
-10
+4
 ```
 
 ## Usage

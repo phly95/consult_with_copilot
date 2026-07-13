@@ -1,7 +1,9 @@
 """Playwright browser interaction for M365 Copilot."""
 
 import os
+import sys
 import time
+import fcntl
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -12,11 +14,42 @@ PERSISTENT_DIR = Path(os.environ.get(
 ))
 TARGET_URL = "https://m365.cloud.microsoft/chat"
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-BINARY_EXTENSIONS = IMAGE_EXTENSIONS | {
-    ".pdf", ".zip", ".tar", ".gz", ".mp3", ".mp4", ".wav",
-    ".woff", ".woff2", ".ttf", ".otf", ".exe", ".dll", ".so",
-}
+
+class ProfileLock:
+    """File-based lock to prevent concurrent Chromium access to the same profile."""
+
+    def __init__(self, profile_dir):
+        self._path = Path(profile_dir) / ".consult_lock"
+        self._fd = None
+
+    def acquire(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = open(self._path, "w")
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._fd.close()
+            self._fd = None
+            raise RuntimeError(
+                f"Browser profile is locked by another process. "
+                f"If no other consult instance is running, delete: {self._path}"
+            )
+
+    def release(self):
+        if self._fd:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                self._fd.close()
+            except OSError:
+                pass
+            self._fd = None
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
 
 
 class CopilotSession:
@@ -30,9 +63,14 @@ class CopilotSession:
         self._pw = None
         self._context = None
         self._page = None
+        self._lock = None
 
     def start(self):
         """Launch browser and navigate to Copilot."""
+        # Acquire profile lock to prevent concurrent access
+        self._lock = ProfileLock(self.profile_dir)
+        self._lock.acquire()
+
         self._pw = sync_playwright().start()
         self._context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
@@ -60,14 +98,21 @@ class CopilotSession:
 
         if not self.skip_login_check:
             if "login" in self._page.url.lower() or "sign" in self._page.url.lower():
+                self._release_lock()
                 raise RuntimeError("Not logged in — run browser in headed mode to authenticate first")
 
     def stop(self):
-        """Close browser."""
+        """Close browser and release profile lock."""
         if self._context:
             self._context.close()
         if self._pw:
             self._pw.stop()
+        self._release_lock()
+
+    def _release_lock(self):
+        if self._lock:
+            self._lock.release()
+            self._lock = None
 
     def _wait_for_chat_ready(self):
         """Wait until chat input is visible (smart wait)."""
@@ -133,6 +178,7 @@ class CopilotSession:
 
     def attach_files(self, file_paths):
         """Attach files to the chat input. Returns list of attached paths."""
+        from lib.security import is_image
         attached = []
         file_input = self._page.locator('input[type="file"]').first
         paths = []
@@ -186,9 +232,8 @@ class CopilotSession:
             t_send = time.time()
             send_btn.click()
 
-            # Wait for response — detect when generation completes
+            # Wait for response — detect when generation completes.
             # Strategy: wait for article to appear, then wait for Stop button to disappear.
-            # The Stop button is present while Copilot is generating and vanishes when done.
             prev_count = len(p.locator('[role="article"]').all())
             response_text = None
             last_text = ""
@@ -210,7 +255,6 @@ class CopilotSession:
 
                     # Stop button gone — generation may be complete
                     if stop_seen:
-                        # Brief stability check (3s) to confirm text isn't still updating
                         if current_text == last_text:
                             stable_count += 1
                             if stable_count >= 3:
@@ -237,7 +281,6 @@ class CopilotSession:
                         stable_count = 0
                         stop_btn = p.locator('button[aria-label="Stop generating"]').all()
                         if len(stop_btn) == 0 and stop_seen:
-                            # Stop button just disappeared and text changed — wait a bit more
                             pass
             if not response_text and last_text:
                 response_text = last_text

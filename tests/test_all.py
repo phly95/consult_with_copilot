@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for consult_with_copilot file handling, sessions, and CLI."""
+"""Tests for consult_with_copilot file handling, sessions, security, and CLI."""
 
 import sys
 import json
@@ -11,9 +11,19 @@ from pathlib import Path
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.files import repo_to_text, bundle_files, should_ignore, is_binary, is_image, file_with_txt_extension
+from lib.files import (
+    repo_to_text, bundle_files, should_ignore, read_file_safe,
+    file_with_txt_extension, load_gitignore,
+)
 from lib.session import SessionManager
+from lib.security import is_binary, is_image, is_sensitive, SENSITIVE_DIRS
 
+CONSULT_PY = str(Path(__file__).parent.parent / "consult.py")
+
+
+# ---------------------------------------------------------------------------
+# repo_to_text
+# ---------------------------------------------------------------------------
 
 def test_repo_to_text():
     """Test repo-to-text conversion."""
@@ -27,11 +37,19 @@ def test_repo_to_text():
 
         text, images = repo_to_text(tmpdir)
 
-        assert "main.py" in text
-        assert "utils.js" in text
-        assert "README.md" in text
+        # New format uses <file path="..."> tags
+        assert '<file path="main.py">' in text
+        assert '<file path="utils.js">' in text
+        assert '<file path="README.md">' in text
         assert "print('hello')" in text
-        assert "node_modules" not in text  # skipped by default
+        # node_modules should be excluded
+        assert "dep.js" not in text
+        # Directory structure should be present
+        assert "<directory_structure>" in text
+        assert "</directory_structure>" in text
+        # Summary should be present
+        assert "<file_summary>" in text
+        assert "</file_summary>" in text
         assert len(images) == 0
         print("  ✓ repo_to_text")
 
@@ -44,7 +62,7 @@ def test_repo_to_text_include():
         (Path(tmpdir) / "README.md").write_text("# Test")
 
         text, _ = repo_to_text(tmpdir, include_patterns=["*.py"])
-        assert "main.py" in text
+        assert '<file path="main.py">' in text
         assert "utils.js" not in text
         assert "README.md" not in text
         print("  ✓ repo_to_text include patterns")
@@ -57,10 +75,43 @@ def test_repo_to_text_exclude():
         (Path(tmpdir) / "test_main.py").write_text("test code")
 
         text, _ = repo_to_text(tmpdir, exclude_patterns=["test_*"])
-        assert "main.py" in text
+        assert '<file path="main.py">' in text
         assert "test_main.py" not in text
         print("  ✓ repo_to_text exclude patterns")
 
+
+def test_repo_to_text_skips_symlinks():
+    """Test that symlinks are skipped during traversal."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        real = Path(tmpdir) / "real.py"
+        real.write_text("print('real')")
+        link = Path(tmpdir) / "link.py"
+        link.symlink_to(real)
+
+        text, _ = repo_to_text(tmpdir)
+        assert '<file path="real.py">' in text
+        assert "link.py" not in text
+        print("  ✓ repo_to_text skips symlinks")
+
+
+def test_repo_to_text_skips_symlink_dirs():
+    """Test that symlinked directories are skipped."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        real_dir = Path(tmpdir) / "real_dir"
+        real_dir.mkdir()
+        (real_dir / "code.py").write_text("print('inside')")
+        link_dir = Path(tmpdir) / "link_dir"
+        link_dir.symlink_to(real_dir)
+
+        text, _ = repo_to_text(tmpdir)
+        assert '<file path="real_dir/code.py">' in text  # from real_dir
+        assert "link_dir" not in text
+        print("  ✓ repo_to_text skips symlinked directories")
+
+
+# ---------------------------------------------------------------------------
+# bundle_files
+# ---------------------------------------------------------------------------
 
 def test_bundle_files():
     """Test file bundling."""
@@ -78,20 +129,58 @@ def test_bundle_files():
         print("  ✓ bundle_files")
 
 
+# ---------------------------------------------------------------------------
+# should_ignore
+# ---------------------------------------------------------------------------
+
 def test_should_ignore():
-    """Test ignore patterns."""
+    """Test ignore patterns with the updated API."""
+    default, gitignore = load_gitignore("/nonexistent")
+
     # *.pyc matches any .pyc file
-    assert should_ignore(Path("file.pyc"), {"*.pyc"})
-    # vendor/* matches files inside vendor directory
-    assert should_ignore(Path("vendor/lib.py"), {"vendor/*"})
+    assert should_ignore(Path("file.pyc"), default)
     # .env matches .env files
-    assert should_ignore(Path(".env"), {".env"})
+    assert should_ignore(Path(".env"), default)
     # node_modules as filename matches node_modules file
-    assert should_ignore(Path("node_modules"), {"node_modules"})
-    # But node_modules/dep.js doesn't match "node_modules" pattern
-    assert not should_ignore(Path("node_modules/dep.js"), {"node_modules"})
+    assert should_ignore(Path("node_modules"), default)
+    # node_modules/dep.js — basename is dep.js, which doesn't match any default
+    assert not should_ignore(Path("node_modules/dep.js"), default)
+    # node_modules IS in DEFAULT_IGNORE as a bare name, so it's skipped at dir level
     print("  ✓ should_ignore")
 
+
+def test_gitignore_negation():
+    """Test that gitignore negation (!) un-ignores files."""
+    default = set()
+    gitignore = ["*.log", "!important.log"]
+
+    # *.log is ignored
+    assert should_ignore(Path("debug.log"), default, gitignore)
+    # important.log is un-ignored by the negation
+    assert not should_ignore(Path("important.log"), default, gitignore)
+    print("  ✓ gitignore negation")
+
+
+def test_gitignore_anchored_pattern():
+    """Test that /build anchors to repo root only."""
+    default = set()
+    # /build should match a file named "build" at repo root but not "vendor/build"
+    gitignore = ["/build"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir).resolve()
+        build_file = root / "build"
+        build_file.write_text("data")
+        vendor_build = root / "vendor" / "build"
+        vendor_build.parent.mkdir()
+        vendor_build.write_text("data")
+        assert should_ignore(build_file, default, gitignore, repo_root=root)
+        assert not should_ignore(vendor_build, default, gitignore, repo_root=root)
+    print("  ✓ gitignore anchored pattern")
+
+
+# ---------------------------------------------------------------------------
+# is_binary / is_image
+# ---------------------------------------------------------------------------
 
 def test_is_binary():
     """Test binary detection."""
@@ -110,10 +199,12 @@ def test_is_image():
     print("  ✓ is_image")
 
 
+# ---------------------------------------------------------------------------
+# file_with_txt_extension
+# ---------------------------------------------------------------------------
+
 def test_file_with_txt_extension():
     """Test .txt extension wrapping."""
-    # Just test the name generation (file doesn't need to exist for the name part)
-    # The function reads the file, so we create a temp file
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
         f.write("print('test')")
         f.flush()
@@ -125,6 +216,69 @@ def test_file_with_txt_extension():
             Path(f.name).unlink()
     print("  ✓ file_with_txt_extension")
 
+
+def test_file_with_txt_extension_already_txt():
+    """Test that .txt files are not double-extended."""
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+        f.write("hello world")
+        f.flush()
+        try:
+            name, content = file_with_txt_extension(Path(f.name))
+            assert name.endswith(".txt")
+            assert not name.endswith(".txt.txt")
+            assert "hello world" in content
+        finally:
+            Path(f.name).unlink()
+    print("  ✓ file_with_txt_extension already .txt")
+
+
+# ---------------------------------------------------------------------------
+# is_sensitive
+# ---------------------------------------------------------------------------
+
+def test_is_sensitive_basename():
+    """Test sensitive file detection by basename."""
+    assert is_sensitive(Path(".env"))
+    assert is_sensitive(Path(".env.local"))
+    assert is_sensitive(Path("credentials.json"))
+    assert is_sensitive(Path("id_rsa"))
+    assert is_sensitive(Path("key.pem"))
+    assert not is_sensitive(Path("main.py"))
+    assert not is_sensitive(Path("README.md"))
+    print("  ✓ is_sensitive basename")
+
+
+def test_is_sensitive_kube_config():
+    """Test that .kube/config is correctly detected via directory component."""
+    assert is_sensitive(Path("/home/user/.kube/config"))
+    assert is_sensitive(Path("/some/project/.kube/config"))
+    # Just "config" alone should NOT be sensitive
+    assert not is_sensitive(Path("config"))
+    print("  ✓ is_sensitive .kube/config")
+
+
+def test_is_sensitive_directory_component():
+    """Test that files inside sensitive directories are flagged."""
+    for dirname in SENSITIVE_DIRS:
+        p = Path(f"/project/{dirname}/any_file.txt")
+        assert is_sensitive(p), f"Expected sensitive: {dirname}/any_file.txt"
+    print("  ✓ is_sensitive directory components")
+
+
+def test_is_sensitive_symlink():
+    """Test that symlinks pointing to sensitive targets are flagged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        secret = Path(tmpdir) / "secret.pem"
+        secret.write_text("key")
+        link = Path(tmpdir) / "innocent_link"
+        link.symlink_to(secret)
+        assert is_sensitive(link)
+        print("  ✓ is_sensitive symlink target")
+
+
+# ---------------------------------------------------------------------------
+# SessionManager
+# ---------------------------------------------------------------------------
 
 def test_session_manager():
     """Test session CRUD operations."""
@@ -170,42 +324,43 @@ def test_session_nonexistent():
         print("  ✓ session_nonexistent")
 
 
-def test_sensitive_file_detection():
-    """Test that sensitive files are identified."""
-    sensitive = [".env", ".env.local", "credentials.json", "id_rsa", "key.pem"]
-    safe = ["main.py", "README.md", "package.json"]
+def test_session_id_validation():
+    """Test that path-traversal session IDs are rejected."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sm = SessionManager(tmpdir)
+        for bad_id in ["../etc/passwd", "foo/../../bar", "a\\b", ""]:
+            try:
+                sm.create(bad_id)
+                assert False, f"Should have rejected: {bad_id!r}"
+            except ValueError:
+                pass
+        print("  ✓ session_id_validation")
 
-    sensitive_patterns = {".env", ".env.local", "credentials.json", "*.pem", "*.key", "id_rsa"}
 
-    for name in sensitive:
-        p = Path(name)
-        matched = False
-        for pattern in sensitive_patterns:
-            if pattern.startswith("*"):
-                if p.name.endswith(pattern[1:]):
-                    matched = True
-            elif p.name == pattern:
-                matched = True
-        assert matched, f"Should be sensitive: {name}"
+def test_session_atomic_write():
+    """Test that session writes are atomic (file exists after write)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sm = SessionManager(tmpdir)
+        sm.create("atomic-test")
+        path = Path(tmpdir) / "atomic-test.json"
+        assert path.exists()
+        # Verify it's valid JSON (not a half-written file)
+        data = json.loads(path.read_text())
+        assert data["id"] == "atomic-test"
+        # Check no temp files are left behind
+        tmp_files = list(Path(tmpdir).glob("*.tmp"))
+        assert len(tmp_files) == 0, "Temp files should be cleaned up"
+        print("  ✓ session_atomic_write")
 
-    for name in safe:
-        p = Path(name)
-        matched = False
-        for pattern in sensitive_patterns:
-            if pattern.startswith("*"):
-                if p.name.endswith(pattern[1:]):
-                    matched = True
-            elif p.name == pattern:
-                matched = True
-        assert not matched, f"Should NOT be sensitive: {name}"
 
-    print("  ✓ sensitive_file_detection")
-
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def test_cli_help():
     """Test that CLI help works."""
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent.parent / "consult.py"), "--help"],
+        [sys.executable, CONSULT_PY, "--help"],
         capture_output=True, text=True, timeout=10
     )
     assert result.returncode == 0
@@ -220,7 +375,7 @@ def test_cli_help():
 def test_cli_send_help():
     """Test send command help."""
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent.parent / "consult.py"), "send", "--help"],
+        [sys.executable, CONSULT_PY, "send", "--help"],
         capture_output=True, text=True, timeout=10
     )
     assert result.returncode == 0
@@ -229,30 +384,84 @@ def test_cli_send_help():
     print("  ✓ cli_send_help")
 
 
+def test_cli_repo_help():
+    """Test repo command help shows --tracked-only."""
+    result = subprocess.run(
+        [sys.executable, CONSULT_PY, "repo", "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0
+    assert "--tracked-only" in result.stdout
+    assert "--dry-run" in result.stdout
+    print("  ✓ cli_repo_help")
+
+
+def test_cli_logout_help():
+    """Test logout command help shows --all flag."""
+    result = subprocess.run(
+        [sys.executable, CONSULT_PY, "logout", "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0
+    assert "--all" in result.stdout
+    print("  ✓ cli_logout_help")
+
+
 def test_repo_dry_run():
     """Test repo dry-run doesn't send anything."""
     with tempfile.TemporaryDirectory() as tmpdir:
         (Path(tmpdir) / "test.py").write_text("print('hello')")
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / "consult.py"),
-             "repo", tmpdir, "--dry-run"],
+            [sys.executable, CONSULT_PY, "repo", tmpdir, "--dry-run"],
             capture_output=True, text=True, timeout=30
         )
         assert result.returncode == 0
+        assert "<directory_structure>" in result.stdout
         assert "test.py" in result.stdout
+        assert "<file " in result.stdout
         print("  ✓ repo_dry_run")
 
 
 def test_exit_codes():
-    """Test that exit codes are correct."""
+    """Test that exit codes are correct (no more sys.exit in handlers)."""
     # File not found
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent.parent / "consult.py"),
-         "send", "test", "--attach", "/nonexistent/file.py"],
+        [sys.executable, CONSULT_PY, "send", "test", "--attach", "/nonexistent/file.py"],
         capture_output=True, text=True, timeout=10
     )
     assert result.returncode == 3, f"Expected exit code 3, got {result.returncode}"
+    assert "file not found" in result.stderr.lower()
     print("  ✓ exit_codes")
+
+
+def test_exit_codes_sensitive_file():
+    """Test exit code for sensitive file rejection."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sensitive = Path(tmpdir) / ".env"
+        sensitive.write_text("SECRET=123")
+        result = subprocess.run(
+            [sys.executable, CONSULT_PY, "send", "test", "--attach", str(sensitive)],
+            capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 4, f"Expected exit code 4, got {result.returncode}"
+        assert "sensitive" in result.stderr.lower()
+        print("  ✓ exit_codes_sensitive_file")
+
+
+def test_bundle_sensitive_file():
+    """Test that bundle rejects sensitive files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        safe = Path(tmpdir) / "main.py"
+        safe.write_text("print('hi')")
+        sensitive = Path(tmpdir) / "id_rsa"
+        sensitive.write_text("private key")
+
+        result = subprocess.run(
+            [sys.executable, CONSULT_PY, "bundle", str(safe), str(sensitive), "review"],
+            capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 4
+        print("  ✓ bundle_sensitive_file")
 
 
 if __name__ == "__main__":
@@ -262,18 +471,32 @@ if __name__ == "__main__":
         test_repo_to_text,
         test_repo_to_text_include,
         test_repo_to_text_exclude,
+        test_repo_to_text_skips_symlinks,
+        test_repo_to_text_skips_symlink_dirs,
         test_bundle_files,
         test_should_ignore,
+        test_gitignore_negation,
+        test_gitignore_anchored_pattern,
         test_is_binary,
         test_is_image,
         test_file_with_txt_extension,
+        test_file_with_txt_extension_already_txt,
+        test_is_sensitive_basename,
+        test_is_sensitive_kube_config,
+        test_is_sensitive_directory_component,
+        test_is_sensitive_symlink,
         test_session_manager,
         test_session_nonexistent,
-        test_sensitive_file_detection,
+        test_session_id_validation,
+        test_session_atomic_write,
         test_cli_help,
         test_cli_send_help,
+        test_cli_repo_help,
+        test_cli_logout_help,
         test_repo_dry_run,
         test_exit_codes,
+        test_exit_codes_sensitive_file,
+        test_bundle_sensitive_file,
     ]
 
     passed = 0
