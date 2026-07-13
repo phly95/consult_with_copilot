@@ -41,6 +41,7 @@ def is_binary(path):
 # Paths containing a sensitive *directory* component are also flagged.
 SENSITIVE_PATTERNS = {
     ".env", ".env.local", ".env.production", ".env.development",
+    ".env.staging", ".env.test", ".env.ci",
     "credentials.json", "service-account.json", "keyfile.json",
     "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
     "id_rsa", "id_ed25519", "id_ecdsa",

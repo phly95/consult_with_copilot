@@ -240,6 +240,9 @@ def test_is_sensitive_basename():
     """Test sensitive file detection by basename."""
     assert is_sensitive(Path(".env"))
     assert is_sensitive(Path(".env.local"))
+    assert is_sensitive(Path(".env.production"))
+    assert is_sensitive(Path(".env.staging"))
+    assert is_sensitive(Path(".env.test"))
     assert is_sensitive(Path("credentials.json"))
     assert is_sensitive(Path("id_rsa"))
     assert is_sensitive(Path("key.pem"))
@@ -464,6 +467,17 @@ def test_bundle_sensitive_file():
         print("  ✓ bundle_sensitive_file")
 
 
+def test_exit_code_constants():
+    """Test that all documented exit codes are defined."""
+    source = Path(CONSULT_PY).read_text()
+    assert "EXIT_OK = 0" in source
+    assert "EXIT_ERROR = 1" in source
+    assert "EXIT_NOT_LOGGED_IN = 2" in source
+    assert "EXIT_FILE_NOT_FOUND = 3" in source
+    assert "EXIT_SENSITIVE_FILE = 4" in source
+    print("  ✓ exit_code_constants")
+
+
 if __name__ == "__main__":
     print("=== Running tests ===\n")
 
@@ -497,6 +511,7 @@ if __name__ == "__main__":
         test_exit_codes,
         test_exit_codes_sensitive_file,
         test_bundle_sensitive_file,
+        test_exit_code_constants,
     ]
 
     passed = 0

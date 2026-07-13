@@ -32,19 +32,16 @@ from lib.security import is_image, is_sensitive
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_NOT_LOGGED_IN = 2
 EXIT_FILE_NOT_FOUND = 3
 EXIT_SENSITIVE_FILE = 4
-
-# Module-level storage for JSON error output.
-_last_error = None
-
 
 def eprint(msg):
     """Print to stderr."""
     print(msg, file=sys.stderr)
 
 
-def _make_json_output(**overrides):
+def _make_json_output(error=None, **overrides):
     """Build a standard JSON response envelope, merging in per-command fields."""
     base = {
         "session_id": None,
@@ -53,7 +50,7 @@ def _make_json_output(**overrides):
         "downloaded": [],
         "elapsed_seconds": None,
         "conversation_url": None,
-        "error": _last_error,
+        "error": error,
     }
     base.update(overrides)
     return base
@@ -437,14 +434,23 @@ def cmd_login(args):
     """Open visible browser for authentication."""
     eprint("Opening browser for M365 login...")
     eprint("Log in, then close the browser window.")
-    with CopilotSession(headless=False, skip_login_check=True) as cs:
-        eprint("Browser open — log in and close when done.")
-        try:
-            cs.page.wait_for_event("close", timeout=0)
-        except Exception:
-            pass
-    eprint("Login complete. Session saved.")
-    return EXIT_OK
+    try:
+        with CopilotSession(headless=False, skip_login_check=True) as cs:
+            eprint("Browser open — log in and close when done.")
+            try:
+                cs.page.wait_for_event("close", timeout=0)
+            except Exception:
+                pass
+            # Verify the session landed on a non-login page
+            url = cs.page.url.lower()
+            if "login" in url or "sign" in url:
+                eprint("Warning: browser was closed on a login page — authentication may not have completed")
+                return EXIT_NOT_LOGGED_IN, "authentication may not have completed"
+        eprint("Login complete. Session saved.")
+        return EXIT_OK, None
+    except Exception as e:
+        eprint(f"Login failed: {e}")
+        return EXIT_ERROR, str(e)
 
 
 def cmd_logout(args):
@@ -476,15 +482,9 @@ def cmd_logout(args):
 
 
 def _exit_with_error(code, message):
-    """Set the module-level error and return the exit code.
-
-    In JSON mode the caller can print ``_last_error`` in the output;
-    in text mode the message goes to stderr immediately.
-    """
-    global _last_error
-    _last_error = message
+    """Print error to stderr and return (exit_code, error_message) tuple."""
     eprint(f"Error: {message}")
-    return code
+    return code, message
 
 
 def main():
@@ -546,23 +546,33 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "doctor":
-        sys.exit(cmd_doctor(args))
-    elif args.command == "send":
-        sys.exit(cmd_send(args))
-    elif args.command == "repo":
-        sys.exit(cmd_repo(args))
-    elif args.command == "bundle":
-        sys.exit(cmd_bundle(args))
-    elif args.command == "session":
-        sys.exit(cmd_session(args))
-    elif args.command == "login":
-        sys.exit(cmd_login(args))
-    elif args.command == "logout":
-        sys.exit(cmd_logout(args))
-    else:
+    handlers = {
+        "doctor": cmd_doctor,
+        "send": cmd_send,
+        "repo": cmd_repo,
+        "bundle": cmd_bundle,
+        "session": cmd_session,
+        "login": cmd_login,
+        "logout": cmd_logout,
+    }
+
+    handler = handlers.get(args.command)
+    if handler is None:
         parser.print_help()
         sys.exit(EXIT_OK)
+
+    result = handler(args)
+    # Handlers return either an int (exit code) or a (code, error) tuple.
+    if isinstance(result, tuple):
+        code, error = result
+    else:
+        code, error = result, None
+
+    json_mode = getattr(args, 'json', False)
+    if json_mode and error:
+        print(json.dumps(_make_json_output(error=error), indent=2))
+
+    sys.exit(code)
 
 
 if __name__ == "__main__":

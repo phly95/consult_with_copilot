@@ -79,7 +79,7 @@ bash setup.sh
 | `bundle f1 f2 "q"` | Bundle files and ask |
 | `doctor` | Check installation and login status |
 | `login` | Open browser to authenticate |
-| `logout` | Delete all local data (profile, sessions, downloads) |
+| `logout` | Delete browser profile (use `--all` to also clear sessions and downloads) |
 | `session --create --list --delete` | Manage conversation sessions |
 
 ### All options
@@ -142,10 +142,12 @@ If your organization requires MFA or SSO, the login browser window will prompt y
 ### Reset / Logout
 
 ```bash
+# Delete browser profile only (clears authentication)
 .venv/bin/python consult.py logout
-```
 
-This deletes the browser profile, all sessions, and downloaded files.
+# Delete everything: browser profile, sessions, and downloads
+.venv/bin/python consult.py logout --all
+```
 
 ## Browser Profile Location
 
@@ -231,7 +233,7 @@ Output:
 ```json
 {
   "session_id": "abc12345",
-  "model": "GPT 5.6 Think",
+  "model": "GPT 5.6 Think deeper",
   "response": "10",
   "downloaded": [],
   "elapsed_seconds": 3.2,
@@ -263,9 +265,14 @@ The tool refuses to attach files matching these patterns:
 
 ### Cleanup
 
-Delete all local data:
+Delete browser profile:
 ```bash
 .venv/bin/python consult.py logout
+```
+
+Delete everything (profile, sessions, downloads):
+```bash
+.venv/bin/python consult.py logout --all
 ```
 
 ## Reliability
