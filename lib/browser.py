@@ -144,7 +144,15 @@ class CopilotSession:
             paths.append(str(p.resolve()))
         if paths:
             file_input.set_input_files(paths)
-            self._page.wait_for_timeout(2000)
+            # Wait for attachment processing — Send button stays disabled until ready
+            send_btn = self._page.locator('button[aria-label="Send"]').first
+            for _ in range(30):  # up to 30s
+                self._page.wait_for_timeout(1000)
+                try:
+                    if send_btn.is_enabled(timeout=500):
+                        break
+                except Exception:
+                    pass
             attached = paths
         return attached
 
@@ -178,24 +186,59 @@ class CopilotSession:
             t_send = time.time()
             send_btn.click()
 
-            # Wait for response — detect when text stabilizes
+            # Wait for response — detect when generation completes
+            # Strategy: wait for article to appear, then wait for Stop button to disappear.
+            # The Stop button is present while Copilot is generating and vanishes when done.
             prev_count = len(p.locator('[role="article"]').all())
             response_text = None
             last_text = ""
             stable_count = 0
-            for i in range(60):
+            stop_seen = False
+            for i in range(180):  # up to 3 min
                 p.wait_for_timeout(1000)
-                current = p.locator('[role="article"]').all()
-                if len(current) > prev_count:
-                    current_text = current[-1].inner_text()
-                    if current_text == last_text:
-                        stable_count += 1
-                        if stable_count >= 3:
-                            response_text = current_text
-                            break
+                articles = p.locator('[role="article"]').all()
+                if len(articles) > prev_count:
+                    current_text = articles[-1].inner_text()
+                    last_text = current_text
+
+                    # Check if Stop button is visible (generation in progress)
+                    stop_btn = p.locator('button[aria-label="Stop generating"]').all()
+                    if len(stop_btn) > 0:
+                        stop_seen = True
+                        stable_count = 0
+                        continue
+
+                    # Stop button gone — generation may be complete
+                    if stop_seen:
+                        # Brief stability check (3s) to confirm text isn't still updating
+                        if current_text == last_text:
+                            stable_count += 1
+                            if stable_count >= 3:
+                                response_text = current_text
+                                break
+                        else:
+                            last_text = current_text
+                            stable_count = 0
                     else:
+                        # Stop button never appeared (fast response) — use stability
+                        if current_text == last_text:
+                            stable_count += 1
+                            if stable_count >= 5 and len(current_text) > 10:
+                                response_text = current_text
+                                break
+                        else:
+                            last_text = current_text
+                            stable_count = 0
+                # Also check for text changes even if no new article
+                elif len(articles) > 0 and last_text:
+                    current_text = articles[-1].inner_text()
+                    if current_text != last_text:
                         last_text = current_text
                         stable_count = 0
+                        stop_btn = p.locator('button[aria-label="Stop generating"]').all()
+                        if len(stop_btn) == 0 and stop_seen:
+                            # Stop button just disappeared and text changed — wait a bit more
+                            pass
             if not response_text and last_text:
                 response_text = last_text
             if not response_text:
