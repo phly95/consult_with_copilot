@@ -27,22 +27,25 @@ This tool stores browser authentication data (cookies, session tokens) at:
 ## Sensitive File Protection
 
 The tool refuses to attach files matching:
-- `.env`, `.env.local`, `.env.production`
-- `credentials.json`, `service-account.json`
-- `*.pem`, `*.key`, `*.p12`, `*.pfx`
+- `.env`, `.env.local`, `.env.production`, `.env.development`, `.env.staging`, `.env.test`, `.env.ci`
+- `credentials.json`, `service-account.json`, `keyfile.json`
+- `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`
 - `id_rsa`, `id_ed25519`, `id_ecdsa`
 - `.netrc`, `.npmrc`, `.pypirc`
-- `kubeconfig`, `.kube/config`
+- `kubeconfig` (or anything inside a `.kube/` directory)
 - Anything inside `browser_profile/` or `browser_data/`
+
+Symlinks pointing to sensitive targets are also blocked (the tool resolves symlinks before checking).
 
 ## Cleanup
 
-Delete all local data:
 ```bash
+# Delete browser profile only (clears authentication)
 python consult.py logout
-```
 
-This removes the browser profile, sessions, and downloads.
+# Delete everything: browser profile, sessions, and downloads
+python consult.py logout --all
+```
 
 ## Reporting Vulnerabilities
 

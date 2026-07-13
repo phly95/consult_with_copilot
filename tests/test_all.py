@@ -478,6 +478,24 @@ def test_exit_code_constants():
     print("  ✓ exit_code_constants")
 
 
+def test_repo_to_text_tracked_only():
+    """Test that tracked_files parameter filters correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "tracked.py").write_text("print('tracked')")
+        (Path(tmpdir) / "untracked.js").write_text("console.log('nope')")
+
+        # Without tracked_files — both included
+        text_all, _ = repo_to_text(tmpdir)
+        assert '<file path="tracked.py">' in text_all
+        assert '<file path="untracked.js">' in text_all
+
+        # With tracked_files — only tracked included
+        text_tracked, _ = repo_to_text(tmpdir, tracked_files={"tracked.py"})
+        assert '<file path="tracked.py">' in text_tracked
+        assert "untracked.js" not in text_tracked
+        print("  ✓ repo_to_text tracked_only")
+
+
 if __name__ == "__main__":
     print("=== Running tests ===\n")
 
@@ -487,6 +505,7 @@ if __name__ == "__main__":
         test_repo_to_text_exclude,
         test_repo_to_text_skips_symlinks,
         test_repo_to_text_skips_symlink_dirs,
+        test_repo_to_text_tracked_only,
         test_bundle_files,
         test_should_ignore,
         test_gitignore_negation,

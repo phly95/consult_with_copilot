@@ -247,10 +247,27 @@ def cmd_repo(args):
     if not repo_path.is_dir():
         return _exit_with_error(EXIT_FILE_NOT_FOUND, f"not a directory: {args.repo_path}")
 
+    # When --tracked-only is set, get the list of git-tracked files
+    tracked_files = None
+    if getattr(args, 'tracked_only', False):
+        try:
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=str(repo_path),
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                tracked_files = set(result.stdout.strip().splitlines())
+            else:
+                eprint("Warning: --tracked-only requires git; falling back to all files")
+        except Exception:
+            eprint("Warning: --tracked-only requires git; falling back to all files")
+
     unified_text, image_paths = repo_to_text(
         args.repo_path,
         include_patterns=args.include,
         exclude_patterns=args.exclude,
+        tracked_files=tracked_files,
     )
 
     # Dry run mode

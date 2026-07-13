@@ -200,8 +200,8 @@ The `repo` command walks a directory tree, concatenates text files with headers,
 ### What gets excluded automatically
 
 - Binary files (images, PDFs, archives, compiled code)
-- Common secret files (`.env`, `credentials.json`, `*.pem`, `id_rsa`)
-- Large files (>100KB)
+- `.env` files (in DEFAULT_IGNORE; other sensitive patterns like `*.pem`, `id_rsa` are only checked for `--attach` and `bundle`, not `repo`)
+- Large files (>100KB) — included with a `[File too large: N bytes]` placeholder instead of contents
 
 ### Patterns
 
@@ -258,10 +258,14 @@ Output:
 ### Sensitive file protection
 
 The tool refuses to attach files matching these patterns:
-- `.env`, `.env.*`, `credentials.json`, `service-account.json`
-- `*.pem`, `*.key`, `*.p12`, `id_rsa`, `id_ed25519`
-- `kubeconfig`, `.kube/config`
+- `.env`, `.env.local`, `.env.production`, `.env.development`, `.env.staging`, `.env.test`, `.env.ci`
+- `credentials.json`, `service-account.json`, `keyfile.json`
+- `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`
+- `id_rsa`, `id_ed25519`, `id_ecdsa`
+- `.netrc`, `.npmrc`, `.pypirc`
+- `kubeconfig` (or anything inside a `.kube/` directory)
 - Anything inside `browser_profile/` or `browser_data/`
+- Symlinks pointing to sensitive targets
 
 ### Cleanup
 
@@ -281,7 +285,7 @@ Delete everything (profile, sessions, downloads):
 
 - **Depends on M365 Copilot web UI** — Microsoft UI changes may break the tool
 - **Not an official API** — this is browser automation, not a supported integration
-- **Model selection** — the tool selects GPT 5.6 Think deeper via the UI; if this model is unavailable, it falls back to whatever is available
+- **Model selection** — the tool selects GPT 5.6 Think deeper via the UI; if the model is unavailable, `set_model()` will raise a Playwright timeout error (no automatic fallback is implemented)
 - **File size limits** — very large repositories may exceed Copilot's input limits
 - **Transient errors** — "Oops! Something happened" errors are auto-retried with page reload (up to 3 retries)
 
@@ -330,7 +334,8 @@ consult_with_copilot/
 ├── lib/
 │   ├── browser.py      # Playwright browser automation
 │   ├── session.py      # Session persistence (JSON)
-│   └── files.py        # Repo-to-text conversion, bundling
+│   ├── files.py        # Repo-to-text conversion, bundling
+│   └── security.py     # File classification, sensitive-file detection
 ├── sessions/           # Conversation state (auto-created)
 ├── downloads/          # Generated files (auto-created)
 ├── setup.sh            # One-command setup

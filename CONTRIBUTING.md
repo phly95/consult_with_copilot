@@ -26,7 +26,7 @@ bash setup.sh
 - Python 3.10+
 - No external dependencies beyond Playwright
 - Keep the CLI interface stable
-- All output to stderr except responses (stdout)
+- Responses go to stdout; status messages go to stderr (for `send` and `repo` commands; `doctor`, `session`, and `--dry-run` output goes to stdout)
 
 ## Submitting Changes
 

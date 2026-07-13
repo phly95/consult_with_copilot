@@ -113,7 +113,7 @@ def read_file_safe(path, max_size=100_000):
         return f"[Error reading file: {e}]"
 
 
-def repo_to_text(repo_path, include_patterns=None, exclude_patterns=None):
+def repo_to_text(repo_path, include_patterns=None, exclude_patterns=None, tracked_files=None):
     """Convert a repository directory into a repomix-style unified text file.
 
     Produces output structured as:
@@ -125,6 +125,8 @@ def repo_to_text(repo_path, include_patterns=None, exclude_patterns=None):
         repo_path: Path to the repository root
         include_patterns: Glob patterns to include (e.g., ["*.py", "*.js"])
         exclude_patterns: Additional glob patterns to exclude
+        tracked_files: Optional set of relative paths (from ``git ls-files``).
+            When provided, only these files are included.
 
     Returns:
         tuple: (unified_text, list_of_image_paths)
@@ -163,6 +165,9 @@ def repo_to_text(repo_path, include_patterns=None, exclude_patterns=None):
                 continue
 
             rel = str(fpath.relative_to(repo_path))
+
+            if tracked_files is not None and rel not in tracked_files:
+                continue
 
             if should_ignore(fpath, default_patterns, gitignore_raw, repo_root=repo_path):
                 continue
