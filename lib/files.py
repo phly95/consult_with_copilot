@@ -137,7 +137,7 @@ def bundle_files(file_paths, base_dir=None):
     Returns:
         tuple: (unified_text, list_of_image_paths)
     """
-    base = Path(base_dir) if base_dir else Path.cwd()
+    base = Path(base_dir) if base_dir else None
     sections = []
     image_paths = []
 
@@ -147,7 +147,13 @@ def bundle_files(file_paths, base_dir=None):
             sections.append(f"--- {fp} [NOT FOUND] ---\n")
             continue
 
-        rel = p.relative_to(base) if base else p.name
+        if base:
+            try:
+                rel = p.relative_to(base)
+            except ValueError:
+                rel = p.name
+        else:
+            rel = p.name
 
         if is_image(p):
             image_paths.append(str(p))

@@ -13,6 +13,9 @@ venv/
 # Old browser profile location (safety net — profile now lives in ~/.cache/)
 browser_data/
 
+# Debug/development files (not distributed)
+debug_archive/
+
 # Session data
 sessions/*.json
 

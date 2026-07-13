@@ -308,7 +308,13 @@ Delete all local data:
 ## Architecture
 
 ```
-Coding Agent → consult.py → Playwright → Chromium → M365 Copilot Web UI → Response
+┌─────────────┐     ┌────────────┐     ┌───────────┐     ┌──────────────────┐
+│ Coding Agent │────▶│ consult.py │────▶│ Playwright │────▶│ M365 Copilot UI  │
+│  (your LLM) │◀────│    CLI     │◀────│ Chromium   │◀────│ (web chat)       │
+└─────────────┘     └────────────┘     └───────────┘     └──────────────────┘
+     sends                sends              opens              sends to
+     shell cmd            message            headless           Microsoft
+                          + files            browser            servers
 ```
 
 ```
