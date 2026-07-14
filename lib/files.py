@@ -6,6 +6,9 @@ from pathlib import Path
 
 from lib.security import is_binary, is_image, BINARY_EXTENSIONS, IMAGE_EXTENSIONS
 
+# Maximum number of attachments per message (M365 Copilot limit).
+MAX_ATTACHMENTS = 3
+
 # Default patterns to always ignore
 DEFAULT_IGNORE = {
     ".git", ".svn", ".hg", "node_modules", "__pycache__", ".venv", "venv",
@@ -111,6 +114,15 @@ def read_file_safe(path, max_size=100_000):
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return f"[Error reading file: {e}]"
+
+
+def format_file_entry(path, content):
+    """Format a single file as a repomix-style XML envelope.
+
+    Produces ``<file path="...">content</file>`` blocks that are consistent
+    across all bundling commands (repo, bundle, send --attach).
+    """
+    return f'<file path="{path}">\n{content}\n</file>\n'
 
 
 def repo_to_text(repo_path, include_patterns=None, exclude_patterns=None, tracked_files=None):
@@ -236,10 +248,8 @@ The content is organized as follows:
     dir_section = f"<directory_structure>\n{dir_tree}</directory_structure>\n"
 
     # 3. File contents
-    file_sections = []
-    for rel, content in file_contents:
-        file_sections.append(f'<file path="{rel}">\n{content}\n</file>\n')
-    files_section = "<files>\n" + "\n".join(file_sections) + "</files>\n"
+    file_sections = [format_file_entry(rel, content) for rel, content in file_contents]
+    files_section = "<files>\n" + "".join(file_sections) + "</files>\n"
 
     unified = summary + "\n" + dir_section + "\n" + files_section
     return unified, image_paths
@@ -283,7 +293,7 @@ def bundle_files(file_paths, base_dir=None):
     for fp in sorted(file_paths):
         p = Path(fp).resolve()
         if not p.exists():
-            sections.append(f"--- {fp} [NOT FOUND] ---\n")
+            sections.append(format_file_entry(fp, "[NOT FOUND]"))
             continue
 
         if base:
@@ -296,19 +306,18 @@ def bundle_files(file_paths, base_dir=None):
 
         if is_image(p):
             image_paths.append(str(p))
-            sections.append(f"--- {rel} [IMAGE - attached separately] ---\n")
+            sections.append(format_file_entry(str(rel), "[IMAGE - attached separately]"))
             continue
 
         if is_binary(p):
-            sections.append(f"--- {rel} [BINARY - skipped] ---\n")
+            sections.append(format_file_entry(str(rel), "[BINARY - skipped]"))
             continue
 
         content = read_file_safe(p)
-        sections.append(f"--- {rel} ---\n{content}\n")
+        sections.append(format_file_entry(str(rel), content))
 
-    unified = "\n".join(sections)
     header = f"# Bundled Files: {len(sections)} files\n\n"
-    return header + unified, image_paths
+    return header + "".join(sections), image_paths
 
 
 def file_with_txt_extension(file_path):

@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.browser import CopilotSession, PERSISTENT_DIR
 from lib.session import SessionManager
-from lib.files import repo_to_text, bundle_files, file_with_txt_extension
-from lib.security import is_image, is_sensitive
+from lib.files import repo_to_text, bundle_files, file_with_txt_extension, format_file_entry, MAX_ATTACHMENTS
+from lib.security import is_image, is_binary, is_sensitive
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -190,45 +190,54 @@ def cmd_send(args):
         if not json_mode:
             eprint(f"Model: {model}")
 
-        # Separate text-based files from image/binary files.
-        # Multiple text files are concatenated into a single attachment
-        # to stay within M365 Copilot's per-message attachment limit (~3).
+        # Process attached files into a single combined attachment.
+        # Multiple text files use repomix-style <file path> format in one
+        # attachment to stay within M365 Copilot's per-message limit.
+        # Images are attached separately; non-image binaries are skipped.
+        temp_dir = tempfile.mkdtemp(prefix="consult_attach_")
         temp_files = []
-        text_files = []
+        combined_parts = []
+        skipped = []
         for fp in attach_files:
             p = Path(fp)
-            if not p.exists():
+            if not p.is_file():
+                skipped.append(f"skipped (not a file): {fp}")
                 continue
             if is_image(fp):
                 temp_files.append(str(p.resolve()))
+            elif is_binary(fp):
+                skipped.append(f"skipped (binary): {fp}")
             else:
-                text_files.append((fp, p))
+                try:
+                    rel = str(Path(fp).resolve().relative_to(Path.cwd()))
+                except ValueError:
+                    rel = str(Path(fp).resolve())
+                content = file_with_txt_extension(fp)[1]
+                combined_parts.append(format_file_entry(rel, content))
 
-        if len(text_files) > 1:
-            # Concatenate all text files into a single combined file.
-            combined_parts = []
-            for fp, p in text_files:
-                txt_name, content = file_with_txt_extension(fp)
-                combined_parts.append(f"===== {txt_name} =====\n{content}\n")
-            combined = "\n".join(combined_parts)
-            combined_file = Path(tempfile.gettempdir()) / "attached_files.txt"
-            combined_file.write_text(combined)
+        if skipped:
+            for msg in skipped:
+                eprint(f"Warning: {msg}")
+
+        if combined_parts:
+            combined = "".join(combined_parts)
+            combined_file = Path(temp_dir) / "attached_files.txt"
+            combined_file.write_text(combined, encoding="utf-8")
             temp_files.insert(0, str(combined_file))
-        elif len(text_files) == 1:
-            fp, p = text_files[0]
-            txt_name, content = file_with_txt_extension(fp)
-            tmp = Path(tempfile.gettempdir()) / txt_name
-            tmp.write_text(content)
-            temp_files.insert(0, str(tmp))
-        # else: no text files, nothing extra to attach
+
+        total_attachments = len(temp_files)
+        if total_attachments > MAX_ATTACHMENTS:
+            eprint(f"Warning: {total_attachments} attachments may exceed "
+                   f"Copilot limit ({MAX_ATTACHMENTS})")
 
         t_start = time.time()
         response, downloaded = cs.send_message(args.message, temp_files or None, download_dir=download_dir)
         elapsed = time.time() - t_start
 
-        # Clean up temp files
+        # Clean up temp files and directory
         for tf in temp_files:
             Path(tf).unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         if json_mode:
             output = _make_json_output(
@@ -317,9 +326,9 @@ def cmd_repo(args):
         return EXIT_OK
 
     # Save as .txt file for attachment
-    repo_name = repo_path.name
-    txt_file = Path(tempfile.gettempdir()) / f"{repo_name}.txt"
-    txt_file.write_text(unified_text)
+    txt_fd, txt_path = tempfile.mkstemp(suffix=".txt", prefix=f"{repo_path.name}_")
+    with os.fdopen(txt_fd, "w", encoding="utf-8") as f:
+        f.write(unified_text)
 
     question = args.context or "Analyze this repository. Explain the architecture, identify key components, and suggest improvements."
 
@@ -338,11 +347,11 @@ def cmd_repo(args):
         if not getattr(args, 'json', False):
             eprint(f"Model: {model}")
 
-        attach = [str(txt_file)] + (image_paths if image_paths else [])
+        attach = [str(txt_path)] + (image_paths if image_paths else [])
         response, downloaded = cs.send_message(question, attach)
         elapsed = time.time() - t_start
 
-        txt_file.unlink(missing_ok=True)
+        Path(txt_path).unlink(missing_ok=True)
 
         json_mode = getattr(args, 'json', False)
         if json_mode:
@@ -393,8 +402,9 @@ def cmd_bundle(args):
     sm.create(session_id, model="GPT 5.6 Think deeper")
 
     # Save as .txt file for attachment
-    txt_file = Path(tempfile.gettempdir()) / "bundled_files.txt"
-    txt_file.write_text(unified_text)
+    txt_fd, txt_path = tempfile.mkstemp(suffix=".txt", prefix="bundled_")
+    with os.fdopen(txt_fd, "w", encoding="utf-8") as f:
+        f.write(unified_text)
 
     if not getattr(args, 'json', False):
         eprint(f"Sending {len(args.files)} files to Copilot ({len(unified_text)} chars)...")
@@ -406,11 +416,11 @@ def cmd_bundle(args):
         if not getattr(args, 'json', False):
             eprint(f"Model: {model}")
 
-        attach = [str(txt_file)] + (image_paths if image_paths else [])
+        attach = [str(txt_path)] + (image_paths if image_paths else [])
         response, downloaded = cs.send_message(question, attach)
         elapsed = time.time() - t_start
 
-        txt_file.unlink(missing_ok=True)
+        Path(txt_path).unlink(missing_ok=True)
 
         json_mode = getattr(args, 'json', False)
         if json_mode:

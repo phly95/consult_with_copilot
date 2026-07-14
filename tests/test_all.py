@@ -114,7 +114,7 @@ def test_repo_to_text_skips_symlink_dirs():
 # ---------------------------------------------------------------------------
 
 def test_bundle_files():
-    """Test file bundling."""
+    """Test file bundling uses repomix-style format."""
     with tempfile.TemporaryDirectory() as tmpdir:
         f1 = Path(tmpdir) / "a.py"
         f2 = Path(tmpdir) / "b.py"
@@ -126,6 +126,8 @@ def test_bundle_files():
         assert "b.py" in text
         assert "def a()" in text
         assert "def b()" in text
+        assert '<file path="' in text
+        assert "</file>" in text
         print("  ✓ bundle_files")
 
 
@@ -460,7 +462,8 @@ def test_bundle_sensitive_file():
         sensitive.write_text("private key")
 
         result = subprocess.run(
-            [sys.executable, CONSULT_PY, "bundle", str(safe), str(sensitive), "review"],
+            [sys.executable, CONSULT_PY, "bundle", str(safe), str(sensitive),
+             "--context", "review"],
             capture_output=True, text=True, timeout=10
         )
         assert result.returncode == 4
@@ -473,14 +476,14 @@ def test_exit_code_constants():
     assert "EXIT_OK = 0" in source
     assert "EXIT_ERROR = 1" in source
     assert "EXIT_NOT_LOGGED_IN = 2" in source
-    assert "EXIT_FILE_NOT_FOUND" in source
-    assert "EXIT_SENSITIVE_FILE" in source
+    assert "EXIT_FILE_NOT_FOUND = 3" in source
+    assert "EXIT_SENSITIVE_FILE = 4" in source
     print("  ✓ exit_code_constants")
 
 
 def test_bundle_context_flag():
     """Test that bundle --context parses context text, not as a file path."""
-    # --context text should NOT be treated as a file
+    # Verify --context and -c are registered
     result = subprocess.run(
         [sys.executable, CONSULT_PY, "bundle", "--help"],
         capture_output=True, text=True, timeout=10
@@ -488,6 +491,20 @@ def test_bundle_context_flag():
     assert result.returncode == 0
     assert "--context" in result.stdout
     assert "-c" in result.stdout
+
+    # Verify --context value is parsed separately from files
+    import ast
+    src = Path(CONSULT_PY).read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument":
+            args = [a.value for a in node.args if isinstance(a, ast.Constant)]
+            if "--context" in args:
+                # Ensure it's a keyword flag, not a positional
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                assert "nargs" not in keywords or getattr(keywords.get("nargs"), "value", None) != "+", \
+                    "bundle --context should be an optional flag, not nargs positional"
+                break
     print("  ✓ bundle_context_flag")
 
 
