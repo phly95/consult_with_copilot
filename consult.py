@@ -190,17 +190,37 @@ def cmd_send(args):
         if not json_mode:
             eprint(f"Model: {model}")
 
-        # Prepare temp files with .txt extension for code files
+        # Separate text-based files from image/binary files.
+        # Multiple text files are concatenated into a single attachment
+        # to stay within M365 Copilot's per-message attachment limit (~3).
         temp_files = []
+        text_files = []
         for fp in attach_files:
             p = Path(fp)
-            if p.exists() and not is_image(fp):
-                txt_name, content = file_with_txt_extension(fp)
-                tmp = Path(tempfile.gettempdir()) / txt_name
-                tmp.write_text(content)
-                temp_files.append(str(tmp))
-            elif p.exists():
+            if not p.exists():
+                continue
+            if is_image(fp):
                 temp_files.append(str(p.resolve()))
+            else:
+                text_files.append((fp, p))
+
+        if len(text_files) > 1:
+            # Concatenate all text files into a single combined file.
+            combined_parts = []
+            for fp, p in text_files:
+                txt_name, content = file_with_txt_extension(fp)
+                combined_parts.append(f"===== {txt_name} =====\n{content}\n")
+            combined = "\n".join(combined_parts)
+            combined_file = Path(tempfile.gettempdir()) / "attached_files.txt"
+            combined_file.write_text(combined)
+            temp_files.insert(0, str(combined_file))
+        elif len(text_files) == 1:
+            fp, p = text_files[0]
+            txt_name, content = file_with_txt_extension(fp)
+            tmp = Path(tempfile.gettempdir()) / txt_name
+            tmp.write_text(content)
+            temp_files.insert(0, str(tmp))
+        # else: no text files, nothing extra to attach
 
         t_start = time.time()
         response, downloaded = cs.send_message(args.message, temp_files or None, download_dir=download_dir)
@@ -543,7 +563,7 @@ def main():
     # bundle
     p_bundle = sub.add_parser("bundle", help="Bundle files and send")
     p_bundle.add_argument("files", nargs="+", metavar="FILE", help="Files to bundle")
-    p_bundle.add_argument("context", nargs="?", help="Question about the files")
+    p_bundle.add_argument("--context", "-c", help="Question about the files")
     p_bundle.add_argument("--session", "-s", help="Session ID")
 
     # session

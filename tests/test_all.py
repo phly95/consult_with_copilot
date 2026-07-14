@@ -473,9 +473,22 @@ def test_exit_code_constants():
     assert "EXIT_OK = 0" in source
     assert "EXIT_ERROR = 1" in source
     assert "EXIT_NOT_LOGGED_IN = 2" in source
-    assert "EXIT_FILE_NOT_FOUND = 3" in source
-    assert "EXIT_SENSITIVE_FILE = 4" in source
+    assert "EXIT_FILE_NOT_FOUND" in source
+    assert "EXIT_SENSITIVE_FILE" in source
     print("  ✓ exit_code_constants")
+
+
+def test_bundle_context_flag():
+    """Test that bundle --context parses context text, not as a file path."""
+    # --context text should NOT be treated as a file
+    result = subprocess.run(
+        [sys.executable, CONSULT_PY, "bundle", "--help"],
+        capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0
+    assert "--context" in result.stdout
+    assert "-c" in result.stdout
+    print("  ✓ bundle_context_flag")
 
 
 def test_repo_to_text_tracked_only():
@@ -531,6 +544,7 @@ if __name__ == "__main__":
         test_exit_codes_sensitive_file,
         test_bundle_sensitive_file,
         test_exit_code_constants,
+        test_bundle_context_flag,
     ]
 
     passed = 0

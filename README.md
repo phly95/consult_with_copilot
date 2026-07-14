@@ -76,7 +76,7 @@ bash setup.sh
 |---------|-------------|
 | `send "msg"` | Send a message to Copilot |
 | `repo ./path "q"` | Convert repo to text and ask |
-| `bundle f1 f2 "q"` | Bundle files and ask |
+| `bundle f1 f2 --context "q"` | Bundle files and ask |
 | `doctor` | Check installation and login status |
 | `login` | Open browser to authenticate |
 | `logout` | Delete browser profile (use `--all` to also clear sessions and downloads) |

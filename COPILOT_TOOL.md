@@ -42,7 +42,7 @@ All commands use `consult_with_copilot/consult.py`. Use the venv Python.
 ### Bundle specific files
 
 ```bash
-.venv/bin/python consult_with_copilot/consult.py bundle file1.py file2.py "review these files"
+.venv/bin/python consult_with_copilot/consult.py bundle file1.py file2.py --context "review these files"
 ```
 
 ### Manage sessions
@@ -80,7 +80,7 @@ All commands use `consult_with_copilot/consult.py`. Use the venv Python.
 | With files | `send "review" --attach file.py` |
 | Follow-up | `send "more?" -s session-id` |
 | About repo | `repo ./path "question"` |
-| Bundle files | `bundle file1.py file2.py "review"` |
+| Bundle files | `bundle file1.py file2.py --context "review"` |
 | Generate file | `send "create X"` (auto-downloads to ./downloads/) |
 | No downloads | `send "question" --no-download` |
 | Sessions | `session --list`, `session --create --id X`, `session --delete X` |
